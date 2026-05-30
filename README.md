@@ -62,4 +62,4 @@ Fully quit and reopen Claude Desktop. The `deep_search` tool should appear.
 
 ## License
 
-[Choose one — MIT is a common default for tools like this.]
+[MIT ]
