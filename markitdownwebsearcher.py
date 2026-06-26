@@ -13,10 +13,10 @@ SSRF hardening, redirect logic, and token accounting are unchanged):
   B. Sliding-window segmentation shifted to step=1 (2-sentence overlap) to keep
      figures glued to their qualifying clauses. No `len-2` tail truncation.
   C. Hybrid-Coverage reranker: cross-encoder demoted from gatekeeper to
-     high-signal noise filter. Relative floor (top_prob - 0.60) PLUS a small
+     high-signal noise filter. Relative floor (top_prob - 0.90) PLUS a small
      absolute floor so the junk filter still bites on hard queries. `break`
      only on the floor; `continue` on domain-cap and dedup. Pool right-sized
-     to 120 to balance the 3x segment growth from step=1.
+     to 200 to balance the 3x segment growth from step=1.
   D. Dual-source chronological sort: engine-provided date (preferred) with a
      trafilatura bare_extraction scraped-date fallback, bound to each segment,
      sorted newest-first with undated entries trailing gracefully.
@@ -34,6 +34,7 @@ import socket
 import math
 import ipaddress
 import datetime as dt
+import requests
 import tiktoken
 from urllib.parse import (quote_plus, urlparse, parse_qs, urljoin,
                           urlencode, urlunparse)
@@ -46,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ======================================================================
 # GLOBAL CONFIGURATION
 # ======================================================================
-MAX_PAGE_SIZE_BYTES = 5 * 1024 * 1024    # 2 MB ceiling: captures any real article,
+MAX_PAGE_SIZE_BYTES = 5 * 1024 * 1024    # 5 MB ceiling: captures any real article,
                                          # keeps memory predictable under 8 workers.
 MAX_REDIRECT_HOPS = 3
 FETCH_TIMEOUT = 12.0
@@ -67,7 +68,7 @@ RELATIVE_CUTOFF_MARGIN = 0.90    # keep chunks within 0.90 of the top probabilit
 ABSOLUTE_PROB_FLOOR = 0.05       # hard junk floor; bites even when query matches poorly
 JACCARD_DEDUP_THRESHOLD = 0.35
 DEDUP_MIN_LEN = 180              # only dedup long narrative blocks
-MAX_PER_DOMAIN = 2               # one excerpt per site -> 50 distinct websites
+MAX_PER_DOMAIN = 2               # two excerpt per domain maximum
 
 # --- Fetch concurrency ------------------------------------------------
 MAX_FETCH_WORKERS = 8
@@ -170,12 +171,12 @@ def execute_hardened_fetch(target_url: str) -> str:
 
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Host": host,
-            }
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Host": host,
+                }
 
             resp = pool.request(
                 "GET", rewritten_url,
@@ -300,7 +301,7 @@ def _parse_engine_date(raw):
 def _searxng_page(query, pageno, time_range):
     """Fetch ONE SearXNG JSON page. Returns the raw results list (may be empty)."""
     try:
-        import requests
+        
         params = {
             "q": query,
             "format": "json",
