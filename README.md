@@ -1,46 +1,37 @@
 # markitdownwebsearcher
 
-A local-first Model Context Protocol (MCP) server that gives LLM clients (Claude Desktop, Cursor, Windsurf) a low-token web search tool. Instead of dumping whole pages into context, it retrieves results across many domains, reranks them locally with two small transformer models, deduplicates overlapping passages, and returns only the most relevant excerpts, sorted newest-first.
-This is a single-user, local-use tool. It is not designed or audited for multi-tenant or hostile network deployment.
+Claude was eating my token budget in 3-4 prompts during research sessions. The culprit was simple — I was dumping entire web pages into context. This MCP server fetches broadly, ranks locally using two small transformer models, and returns only the passages that matter. No full pages, no external ranking APIs.
 
-## What it does
-Given a query, the server:
+Works with Claude Desktop, Cursor, and Windsurf. Single-user, runs on your machine. I haven't tested it in multi-tenant or hostile network environments and wouldn't recommend it there.
+## What happens when you run a query
 
-1. Pulls result links from a local SearXNG instance (paginated across multiple result pages, accumulating distinct domains), with a DuckDuckGo HTML fallback if SearXNG returns nothing.
-2. Fetches each result page through an SSRF-hardened, IP-pinned fetcher with a streaming byte ceiling.
-3. Extracts article text, segments it into overlapping sentence windows, and filters out keyword-spam blocks.
-4. Reranks passages locally: a bi-encoder pre-filter followed by a cross-encoder rerank with sigmoid-normalized scoring.
-5. Deduplicates near-identical passages and returns excerpts (capped per domain), sorted newest-first by publication date where available.
+- Hits a local SearXNG instance and paginates until it has links from enough distinct domains. If SearXNG is unreachable, it falls back to DuckDuckGo's HTML endpoint — unofficial, occasionally breaks, use it as a last resort.
+- Each page goes through a fetcher that pins IPs, checks for SSRF risks, and cuts off downloads at 5 MB. Avoids memory blowouts with 8 workers running at once.
+- Article text gets pulled from HTML, chopped into overlapping 3-sentence windows. Anything that looks like SEO filler gets dropped before ranking.
+- Two-stage local ranking: bi-encoder does a fast pre-filter, cross-encoder scores what survives. Runs on your CPU or GPU, no API calls.
+- Near-duplicate passages are removed via Jaccard comparison. Results are capped per domain and sorted newest-first where dates exist.
+- You get excerpts with source URLs and dates. Synthesis is your LLM's job.
+## What's under the hood
 
-It returns text excerpts with their source URLs and dates — not a synthesized answer. Your LLM client does the synthesis.
+- **Two-stage reranking** — bi-encoder (all-MiniLM-L6-v2) narrows candidates fast, cross-encoder (ms-marco-MiniLM-L-6-v2) scores the survivors. No ranking API, no per-query cost.
+- **SSRF-hardened fetcher** — hostnames are resolved once, IPs checked against private/loopback/reserved/multicast/CGNAT ranges before any connection opens. Pinned to that validated IP, TLS still runs against the real hostname. Redirects are followed manually, re-validated at each hop, hard hop limit enforced.
+- **5 MB streaming ceiling** — download aborts the moment it crosses MAX_PAGE_SIZE_BYTES.
+- **Jaccard deduplication** — overlapping passages compared before output. Near-duplicates dropped.
+- **Token report** — each response includes output token count vs raw extracted tokens. Local heuristic, rough estimate.
+- **Dual-pass recency** — first pass uses a time filter, second pass runs without it to catch evergreen sources that don't surface in recency-filtered results.
 
+## Setup
 
-## Features
-
-- **Local two-stage reranking** — a bi-encoder (all-MiniLM-L6-v2) pre-filter followed by a cross-encoder (ms-marco-MiniLM-L-6-v2) rerank. No external ranking API and no per-query cost.
-- **SSRF-validated fetch** — each hostname is resolved once and the resolved IP is checked against private/loopback/link-local/reserved/multicast/unspecified/CGNAT ranges before connecting. The connection is pinned to the validated IP, with TLS SNI and certificate validation against the real hostname. Redirects are followed manually with a hop limit, re-validating at each hop.
-- **Streaming byte ceiling** — downloads abort once they exceed the configured limit (currently 5 MB; see MAX_PAGE_SIZE_BYTES) to keep memory bounded under concurrent fetches.
-- **Deduplication** — Jaccard-similarity filtering on longer overlapping passages.
-- **Token report** — reports the returned excerpt token count against the raw extracted token count (a rough local heuristic, not a benchmark against any other tool).
-- **Dual-pass recency** — one time-filtered pass (recency-biased) plus one unfiltered pass to backfill evergreen sources.
-
-## Requirements
-
-- Python 3.10+.
-- A reachable SearXNG instance with JSON output enabled (default expected at http://localhost:8080/search). Without it, the tool falls back to scraping DuckDuckGo's HTML endpoint, which is best-effort only (see Limitations).
--   Install dependencies:
-
+Python 3.10 or newer. You'll need a local SearXNG instance with JSON output enabled — the server expects it at http://localhost:8080/search by default.
 ```bash
 pip install -r requirements.txt
 ```
+First run downloads the two ranking models from Hugging Face (~180 MB combined) and caches them locally.
 
-First run downloads the two models (~180 MB) from Hugging Face and caches them.
 
-## Use with Claude Desktop
+## Adding it to Claude Desktop
 
-Add to `claude_desktop_config.json` (Settings → Developer → Edit Config),
-using absolute paths:
-
+Open `claude_desktop_config.json`  via Settings → Developer → Edit Config. Add this block with your actual absolute paths:
 ```json
 {
   "mcpServers": {
@@ -51,38 +42,35 @@ using absolute paths:
   }
 }
 ```
+Fully quit Claude Desktop and reopen it. The `deep_search tool` should appear.
 
-Fully quit and reopen Claude Desktop. The `deep_search` tool should appear.
 
-## Configuration
+## Tweaking the defaults
 
-Key constants at the top of `markitdownwebsearcher.py`:
+These constants are at the top of `markitdownwebsearcher.py`. If you change a value, update the comment next to it too.
+
 
 | Constant | Meaning |
 | --- | --- |
-| `SEARXNG_URL` | Local SearXNG search endpoint |
-| `MAX_PAGE_SIZE_BYTES` | Per-page download ceiling (streaming abort) |
-| `TARGET_DISTINCT_DOMAINS` | Domain-count goal that stops pagination |
-| `MAX_PAGES_TO_ACCUMULATE` | Hard ceiling on pagination depth |
-| `SEARXNG_TIME_RANGE` | Recency window for the time-filtered pass |
-| `DUAL_PASS_RECENCY` | Whether to run the second, unfiltered pass |
-| `MAX_CANDIDATES_POOL` | Passages kept after the bi-encoder pre-filter |
-| `MAX_RESULTS` | Maximum excerpts returned |
-| `MAX_PER_DOMAIN` | Maximum excerpts from any single domain |
+| `SEARXNG_URL` | Local SearXNG instance lives |
+| `MAX_PAGE_SIZE_BYTES` | Per-page download ceiling |
+| `TARGET_DISTINCT_DOMAINS` | Unique domains to collect before stopping pagination |
+| `MAX_PAGES_TO_ACCUMULATE` | Hard cap on pagination depth |
+| `SEARXNG_TIME_RANGE` | Recency window on the first pass |
+| `DUAL_PASS_RECENCY` | Toggle the second unfiltered pass |
+| `MAX_CANDIDATES_POOL` | Passages that survive the bi-encoder pre-filter |
+| `MAX_RESULTS` | Max excerpts in final output |
+| `MAX_PER_DOMAIN` | Max excerpts from any single domain |
 | `MAX_FETCH_WORKERS` | Concurrent fetch workers |
 
-If you change any of these, update the comments next to them so the values and the prose stay in sync.
 
 ## Limitations & scope
 
-- **Single-user, local use.** The fetch path is SSRF-validated but not audited
-  for hostile multi-tenant deployment.
-- **Search depends on scraping the DuckDuckGo HTML endpoint** (`html.duckduckgo.com`).
-  This is unofficial, may break without notice, and is subject to DuckDuckGo's
-  terms of service. Treat search reliability as best-effort.
-- Pages are fetched sequentially with no concurrency; large source counts
-  increase latency, which can hit a client's tool-call timeout.
-- Large pages (e.g. some Wikipedia articles) may be skipped by the 512 KB ceiling.
+- **Single-user only.** The fetch path has SSRF protections but has never been audited for hostile multi-tenant use. Don't expose it to untrusted traffic.
+- **DuckDuckGo fallback is fragile**. The HTML scraping endpoint can block requests or change structure without warning.
+- **Slow on big result sets**. Eight workers run concurrently but with 90 target domains and real network variance, some clients will hit tool-call timeouts on slower connections.
+- **Large pages get cut off**. Anything over 5 MB is dropped mid-download. Most articles are fine, but long Wikipedia pages and legal documents sometimes don't make it through. I ran into this a few times during testing and just accepted it as a tradeoff.
+
 
 ## License
 
