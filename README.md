@@ -1,4 +1,4 @@
-# markitdownwebsearcher
+# deepsearch-mcp
 
 Claude was eating my token budget in 3-4 prompts during research sessions. The culprit was simple — I was dumping entire web pages into context. This MCP server fetches broadly, ranks locally using two small transformer models, and returns only the passages that matter. No full pages, no external ranking APIs.
 
@@ -37,7 +37,7 @@ Open `claude_desktop_config.json`  via Settings → Developer → Edit Config. A
   "mcpServers": {
     "deep-search": {
       "command": "C:\\path\\to\\venv\\Scripts\\python.exe",
-      "args": ["C:\\path\\to\\markitdownwebsearcher.py"]
+      "args": ["C:\\path\\to\\deepsearch-mcp.py"]
     }
   }
 }
@@ -47,7 +47,7 @@ Fully quit Claude Desktop and reopen it. The `deep_search tool` should appear.
 
 ## Tweaking the defaults
 
-These constants are at the top of `markitdownwebsearcher.py`. If you change a value, update the comment next to it too.
+These constants are at the top of `deepsearch-mcp.py`. If you change a value, update the comment next to it too.
 
 
 | Constant | Meaning |
